@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: demographic-backend
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      # Mount host directory for ONNX models to inject weight files into container
+      - ./models/weights:/app/models/weights
+    ports:
+      # Keep backend port exposed for development/testing scripts (e.g. test_pipeline.py)
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 15s  # InsightFace ONNX loads in ~2s, no PyTorch warm-up needed
+
+  nginx:
+    image: nginx:alpine
+    container_name: demographic-nginx
+    restart: always
+    ports:
+      # Nginx acts as the high-performance public entry point (serves frontend and proxies API)
+      - "80:80"
+    volumes:
+      # Mount Nginx configuration from local file
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+

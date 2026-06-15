@@ -1,0 +1,90 @@
+# ==============================================================================
+# Python
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+*.iws
+.idea_modules/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# ==============================================================================
+# Project-specific
+# ==============================================================================
+# Debug output directories
+debug_crops/
+debug_output/
+
+# Logs
+logs/
+*.log
+
+# Model weights (large ONNX files, should be mounted as volume in Docker)
+models/weights/*.onnx
+models/weights/*.pth
+models/weights/*.pt
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# ==============================================================================
+# Docker
+# ==============================================================================
+# .dockerignore is versioned, but we ignore Docker build artifacts
+.dockerignore
+
+# ==============================================================================
+# Environment
+# ==============================================================================
+# NOTE: .env is intentionally NOT ignored here because it contains
+# production configuration (MODEL_TYPE, paths, etc.) that should be
+# versioned. If you have secrets, use a separate .env.secrets file
+# and add it to this ignore list.
+# .env
+.env
+.env.local
+.env.*.local
+
+node_modules/

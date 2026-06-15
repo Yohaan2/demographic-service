@@ -1,0 +1,26 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+gunicorn>=21.2.0
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+opencv-python-headless>=4.9.0.80
+# numpy 2.x is required by torch/mivolo/ultralytics in the working environment
+numpy>=2.0.0
+onnxruntime>=1.16.0
+loguru>=0.7.2
+prometheus-client>=0.20.0
+python-multipart>=0.0.9
+scipy>=1.11.0
+filterpy>=1.4.5
+
+# --- Deep Learning stack (versions aligned with the working dev environment) ---
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.38.0
+accelerate>=0.28.0
+# NOTE: 'timm' is intentionally NOT pinned here. The 'mivolo' package below
+# pins it exactly to timm==0.8.13.dev0, and adding our own constraint breaks resolution.
+
+# --- MiVOLO V2 age/gender model (loaded via trust_remote_code) ---
+# Installs mivolo plus its locked deps: timm==0.8.13.dev0, ultralytics==8.1.0, lapx, yt-dlp
+mivolo @ git+https://github.com/WildChlamydia/MiVOLO.git
