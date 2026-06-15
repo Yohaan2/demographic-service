@@ -119,9 +119,9 @@ export default function App() {
     formData.append('timestamp', Math.floor(Date.now() / 1000));
     formData.append('image', selectedFile);
 
-    // In Docker-compose, Nginx handles API on the same domain or proxied.
-    // For development convenience, we point to the Nginx reverse proxy endpoint.
-    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1/analyze';
+    // In Docker-compose, Nginx proxies API on the same domain.
+    // Use relative path by default, can override with VITE_API_URL for local dev.
+    const apiUrl ='/api/v1/analyze';
 
     try {
       const response = await fetch(apiUrl, {
