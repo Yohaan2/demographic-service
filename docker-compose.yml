@@ -6,7 +6,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: demographic-backend
-    restart: always
+    restart: unless-stopped
     env_file:
       - .env
     volumes:
@@ -25,7 +25,7 @@ services:
   nginx:
     image: nginx:alpine
     container_name: demographic-nginx
-    restart: always
+    restart: unless-stopped
     ports:
       # Nginx acts as the high-performance public entry point (serves frontend and proxies API)
       - "80:80"
@@ -36,3 +36,41 @@ services:
       backend:
         condition: service_healthy
 
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    pid: host
+    volumes:
+      - "/:/host:ro,rslave"
+    command:
+      - '--path.rootfs=/host'
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    restart: unless-stopped
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./promtail-config.yml:/etc/promtail/config.yml
+    command:
+      - -config.file=/etc/promtail/config.yml

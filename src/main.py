@@ -10,6 +10,7 @@ from prometheus_client import CONTENT_TYPE_LATEST
 
 from src.core.config import settings
 from src.core.logging import setup_logging, logger
+from src.core.tracing import instrument_fastapi, shutdown_tracing
 from src.pipelines.age_gender_pipeline import AgeGenderPipeline
 from src.api.schemas.demographics import AnalyzeResponse
 from src.metrics.prometheus import (
@@ -47,6 +48,7 @@ async def lifespan(app: FastAPI):
     # Clear pipeline to free memory space
     if hasattr(app.state, "pipeline"):
         del app.state.pipeline
+    shutdown_tracing()
     logger.info("Application successfully shutdown.")
 
 
@@ -56,6 +58,8 @@ app = FastAPI(
     description="High-performance video analytics service for age and gender estimation using SCRFD + ByteTrack + MiVOLO",
     lifespan=lifespan
 )
+
+instrument_fastapi(app)
 
 # CORS configurations
 app.add_middleware(
