@@ -5,9 +5,9 @@ FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app/client
 
-# Copy package descriptors and download Node packages
+# Copy package descriptors and install the exact versions pinned in package-lock.json
 COPY client/package*.json ./
-RUN npm install
+RUN npm ci
 
 # Copy source and build static distribution directory (dist/)
 COPY client/ ./
@@ -64,12 +64,13 @@ RUN mkdir -p models/weights
 COPY src/ ./src/
 
 # Set up non-root security privileges and a writable HuggingFace cache directory
-RUN groupadd -r appgroup && useradd -r -g appgroup -s /sbin/nologin appuser && \
+RUN groupadd -r appgroup && useradd -r -g appgroup -d /app -s /sbin/nologin appuser && \
     mkdir -p /app/.cache/huggingface && \
     chown -R appuser:appgroup /app
 USER appuser
 
-# Direct HuggingFace model downloads to a writable directory owned by appuser
+# Direct application and HuggingFace files to writable paths owned by appuser
+ENV HOME=/app
 ENV HF_HOME=/app/.cache/huggingface
 
 # Expose API & Frontend consolidated PORT
@@ -78,10 +79,17 @@ EXPOSE 8000
 # Python path configuration
 ENV PYTHONPATH=/app
 
+# One process per container: parallelism comes from N replicas behind Nginx (hash by X-Camera-Id).
+# Keep native libraries single-threaded; ONNX Runtime threads are set via ORT_INTRA_OP_THREADS.
+ENV OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    OPENCV_NUM_THREADS=1
+
 # Native, highly secure Python healthcheck (Zero vulnerability setup)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)" || exit 1
 
-# Launch FastAPI utilizing Gunicorn as process manager and Uvicorn for asynchronous requests
-# WEB_CONCURRENCY defaults to 4 if not set (typical for 4-core containers)
-CMD ["sh", "-c", "gunicorn src.main:app -w ${WEB_CONCURRENCY:-4} -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000 --timeout 120"]
+# Launch a SINGLE Uvicorn process. Tracker and aggregation state live in memory per process,
+# so every camera must always reach the same process: scale with replicas, never with workers.
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log", "--timeout-keep-alive", "30"]

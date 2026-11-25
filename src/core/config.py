@@ -16,12 +16,20 @@ class Settings(BaseSettings):
     WORKERS: int = 4
     
     # Core Pipeline settings
-    MODEL_TYPE: str = "mivolo"  # options: mivolo | insightface
+    MODEL_TYPE: str = "insightface"  # options: insightface | mivolo
     DETECTOR: str = "scrfd"      # options: scrfd
+
+    # Strict model mode: when True, a missing/broken model aborts startup and an inference
+    # error propagates (HTTP 500). Fallbacks (Haar Cascade / SHA-256) are only allowed when False.
+    STRICT_MODELS: bool = True
+
+    # Inference threading (per process)
+    ORT_INTRA_OP_THREADS: int = 2      # intra_op_num_threads for every ONNX Runtime session
+    INFERENCE_CONCURRENCY: int = 2     # max frames processed concurrently by this process
     
     # Models path
     DETECTOR_MODEL_PATH: str = "models/weights/scrfd_2.5g_bnkps.onnx"
-    AGE_GENDER_MODEL_PATH: str = "models/weights/mivolo_v2.onnx"
+    AGE_GENDER_MODEL_PATH: str = "models/weights/mivolo_v2.onnx"  # only used when MODEL_TYPE=mivolo
     INSIGHTFACE_MODEL_PATH: str = "models/weights/genderage.onnx"
     
     # Trackers configuration

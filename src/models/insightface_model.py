@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 from typing import Optional
 from src.models.base import AgeGenderModel, AgeGenderResult
+from src.core.config import settings
 from src.core.logging import logger
 
 # InsightFace buffalo_l genderage.onnx expects 96x96 aligned faces (RGB, normalized to [-1,1]).
@@ -31,10 +32,16 @@ class InsightFaceAgeGenderModel(AgeGenderModel):
 
         if model_path:
             self.load_model(model_path)
+        elif settings.STRICT_MODELS:
+            raise RuntimeError("STRICT_MODELS=True but no InsightFace genderage model path was configured.")
 
     def load_model(self, model_path: str) -> None:
-        """Loads the genderage.onnx ONNX session."""
+        """Loads the genderage.onnx ONNX session (SHA-256 fallback only when STRICT_MODELS=False)."""
         if not os.path.exists(model_path):
+            if settings.STRICT_MODELS:
+                raise FileNotFoundError(
+                    f"InsightFace genderage model not found: {model_path} (STRICT_MODELS=True)"
+                )
             logger.warning(
                 "InsightFace genderage.onnx not found. Activating SHA-256 fallback.",
                 missing_path=model_path
@@ -48,7 +55,7 @@ class InsightFaceAgeGenderModel(AgeGenderModel):
             opts = ort.SessionOptions()
             opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
             opts.inter_op_num_threads = 1
-            opts.intra_op_num_threads = os.cpu_count() or 4
+            opts.intra_op_num_threads = settings.ORT_INTRA_OP_THREADS
 
             self.session = ort.InferenceSession(
                 model_path,
@@ -66,10 +73,14 @@ class InsightFaceAgeGenderModel(AgeGenderModel):
             logger.info("InsightFace genderage.onnx loaded and warmed up.", model_path=model_path)
 
         except Exception as e:
+            if settings.STRICT_MODELS:
+                logger.critical("Failed to load InsightFace ONNX model (STRICT_MODELS=True)", error=str(e))
+                raise
             logger.warning(
                 "Failed to load InsightFace ONNX model. Using SHA-256 fallback.",
                 error=str(e)
             )
+            self.session = None
             self.use_fallback = True
 
     def _preprocess(self, face_crop: np.ndarray) -> np.ndarray:
@@ -101,40 +112,51 @@ class InsightFaceAgeGenderModel(AgeGenderModel):
         Returns:
             AgeGenderResult with predicted age, gender, and gender confidence.
         """
+        if settings.STRICT_MODELS:
+            if self.session is None:
+                raise RuntimeError("InsightFace genderage session is not loaded (STRICT_MODELS=True)")
+            # Any inference error propagates to the caller (HTTP 500); never fabricate demographics.
+            return self._infer(face_crop)
+
         if self.use_fallback or self.session is None:
             return self._estimate_fallback(face_crop)
 
         try:
-            input_tensor = self._preprocess(face_crop)
-            outputs = self.session.run(None, {self.input_name: input_tensor})
-
-            # buffalo_l fc1 output layout:
-            #   fc1[0] = female logit
-            #   fc1[1] = male logit
-            #   fc1[2] = age normalized [0, 1]
-            result = outputs[0][0]  # shape [3]
-
-            logits = result[:2]
-            age_raw = float(result[2]) * 100.0
-
-            # Apply softmax to calculate accurate gender confidence
-            exp_logits = np.exp(logits - np.max(logits))
-            probs = exp_logits / np.sum(exp_logits)
-
-            gender_idx = int(np.argmax(probs))
-            gender = GENDER_LABELS[gender_idx]
-            gender_confidence = float(probs[gender_idx])
-
-            age = float(np.clip(age_raw, 1.0, 100.0))
-
-            return AgeGenderResult(age=age, gender=gender, gender_confidence=gender_confidence)
-
+            return self._infer(face_crop)
         except Exception as e:
             logger.error("InsightFace genderage inference failed; invoking fallback", error=str(e))
             return self._estimate_fallback(face_crop)
 
+    def _infer(self, face_crop: np.ndarray) -> AgeGenderResult:
+        """Runs the actual ONNX inference and decodes the fc1 output."""
+        input_tensor = self._preprocess(face_crop)
+        outputs = self.session.run(None, {self.input_name: input_tensor})
+
+        # buffalo_l fc1 output layout:
+        #   fc1[0] = female logit
+        #   fc1[1] = male logit
+        #   fc1[2] = age normalized [0, 1]
+        result = outputs[0][0]  # shape [3]
+
+        logits = result[:2]
+        age_raw = float(result[2]) * 100.0
+
+        # Apply softmax to calculate accurate gender confidence
+        exp_logits = np.exp(logits - np.max(logits))
+        probs = exp_logits / np.sum(exp_logits)
+
+        gender_idx = int(np.argmax(probs))
+        gender = GENDER_LABELS[gender_idx]
+        gender_confidence = float(probs[gender_idx])
+
+        age = float(np.clip(age_raw, 1.0, 100.0))
+
+        return AgeGenderResult(age=age, gender=gender, gender_confidence=gender_confidence)
+
     def _estimate_fallback(self, face_crop: np.ndarray) -> AgeGenderResult:
-        """Deterministic SHA-256 fallback — identical output for identical input crops."""
+        """Deterministic SHA-256 fallback — identical output for identical input crops (development only)."""
+        if settings.STRICT_MODELS:
+            raise RuntimeError("SHA-256 demographic fallback is forbidden when STRICT_MODELS=True")
         import hashlib
 
         stable = cv2.resize(face_crop, (32, 32))

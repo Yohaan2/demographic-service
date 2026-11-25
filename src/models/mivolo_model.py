@@ -4,13 +4,15 @@ import hashlib
 import numpy as np
 from typing import Optional
 from src.models.base import AgeGenderModel, AgeGenderResult
+from src.core.config import settings
 from src.core.logging import logger
 
 
 class MiVOLOModel(AgeGenderModel):
     """
     Implementation of the official HuggingFace MiVOLO V2 model for age and gender estimation.
-    Downloads the model and preprocessor dynamically, with a clean SHA-256 fallback.
+    Downloads the model and preprocessor dynamically. The SHA-256 fallback is only available
+    when settings.STRICT_MODELS=False; in strict mode load/inference errors are raised.
     """
     def __init__(self, model_path: Optional[str] = None):
         self.use_fallback = False
@@ -66,59 +68,75 @@ class MiVOLOModel(AgeGenderModel):
             logger.info("MiVOLO V2 PyTorch model successfully loaded and warmed up.")
             
         except Exception as e:
+            if settings.STRICT_MODELS:
+                logger.critical("Could not load Hugging Face MiVOLO v2 model (STRICT_MODELS=True)", error=str(e))
+                raise
             logger.warning(
                 "Could not load Hugging Face MiVOLO v2 model (torch/transformers not ready or offline). Using SHA-256 fallback.",
                 error=str(e)
             )
+            self.model = None
             self.use_fallback = True
 
     def estimate(self, face_crop: np.ndarray) -> AgeGenderResult:
-        """Estimates age and gender of a facial crop using Hugging Face MiVOLO V2 or fallback."""
+        """Estimates age and gender of a facial crop using Hugging Face MiVOLO V2 (or fallback in dev)."""
+        if settings.STRICT_MODELS:
+            if self.model is None:
+                raise RuntimeError("MiVOLO model is not loaded (STRICT_MODELS=True)")
+            # Any inference error propagates to the caller (HTTP 500); never fabricate demographics.
+            return self._infer(face_crop)
+
         if self.use_fallback or self.model is None:
             return self._estimate_fallback(face_crop)
-            
+
         try:
-            import torch
-            
-            # 1. MiVOLO's image processor expects BGR inputs (OpenCV native format).
-            # Per the official model card, do NOT convert to RGB.
-            faces_crops = [face_crop]
-            bodies_crops = [None]
-            
-            inputs_faces = self.image_processor(images=faces_crops)["pixel_values"]
-            inputs_bodies = self.image_processor(images=bodies_crops)["pixel_values"]
-            
-            # 3. Create PyTorch tensors
-            faces_tensor = torch.tensor(np.array(inputs_faces)).to(dtype=self.model.dtype)
-            body_tensor = torch.tensor(np.array(inputs_bodies)).to(dtype=self.model.dtype)
-            
-            # 4. Execute PyTorch inference in inference mode (faster than no_grad on CPU)
-            with torch.inference_mode():
-                output = self.model(faces_input=faces_tensor, body_input=body_tensor)
-                
-            # 5. Extract and normalize demographic outputs
-            age = float(output.age_output[0].item())
-            # Clamp age to human realistic limits
-            age = max(1.0, min(100.0, age))
-            
-            # Gender label mapping from Hugging Face config
-            id2label = self.config.gender_id2label
-            gender_idx = int(output.gender_class_idx[0].item())
-            gender = id2label[gender_idx].lower()  # 'male' or 'female'
-            
-            gender_prob = float(output.gender_probs[0].item())
-            
-            return AgeGenderResult(age=age, gender=gender, gender_confidence=gender_prob)
-            
+            return self._infer(face_crop)
         except Exception as e:
             logger.error("Hugging Face MiVOLO V2 inference failed; invoking fallback", error=str(e))
             return self._estimate_fallback(face_crop)
+
+    def _infer(self, face_crop: np.ndarray) -> AgeGenderResult:
+        """Runs the actual MiVOLO V2 PyTorch inference."""
+        import torch
+
+        # 1. MiVOLO's image processor expects BGR inputs (OpenCV native format).
+        # Per the official model card, do NOT convert to RGB.
+        faces_crops = [face_crop]
+        bodies_crops = [None]
+
+        inputs_faces = self.image_processor(images=faces_crops)["pixel_values"]
+        inputs_bodies = self.image_processor(images=bodies_crops)["pixel_values"]
+
+        # 3. Create PyTorch tensors
+        faces_tensor = torch.tensor(np.array(inputs_faces)).to(dtype=self.model.dtype)
+        body_tensor = torch.tensor(np.array(inputs_bodies)).to(dtype=self.model.dtype)
+
+        # 4. Execute PyTorch inference in inference mode (faster than no_grad on CPU)
+        with torch.inference_mode():
+            output = self.model(faces_input=faces_tensor, body_input=body_tensor)
+
+        # 5. Extract and normalize demographic outputs
+        age = float(output.age_output[0].item())
+        # Clamp age to human realistic limits
+        age = max(1.0, min(100.0, age))
+
+        # Gender label mapping from Hugging Face config
+        id2label = self.config.gender_id2label
+        gender_idx = int(output.gender_class_idx[0].item())
+        gender = id2label[gender_idx].lower()  # 'male' or 'female'
+
+        gender_prob = float(output.gender_probs[0].item())
+
+        return AgeGenderResult(age=age, gender=gender, gender_confidence=gender_prob)
 
     def _estimate_fallback(self, face_crop: np.ndarray) -> AgeGenderResult:
         """
         Fidelity fallback: hashes pixel bytes to deterministically generate age and gender.
         This ensures identical crops across consecutive frames yield identical predictions.
+        Development only: forbidden when STRICT_MODELS=True.
         """
+        if settings.STRICT_MODELS:
+            raise RuntimeError("SHA-256 demographic fallback is forbidden when STRICT_MODELS=True")
         stable_crop = cv2.resize(face_crop, (32, 32))
         pixel_bytes = stable_crop.tobytes()
         

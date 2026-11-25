@@ -4,13 +4,17 @@ import numpy as np
 from typing import List, Tuple, Optional
 import onnxruntime as ort
 from src.detectors.base import FaceDetector, FaceDetectionResult
+from src.core.config import settings
 from src.core.logging import logger
 
 
 class SCRFDDetector(FaceDetector):
     """
-    Implementation of the SCRFD (Sample and Computation Redistribution for Face Detection) 
-    using ONNX Runtime with a built-in highly accurate Haar Cascade fallback.
+    Implementation of the SCRFD (Sample and Computation Redistribution for Face Detection)
+    using ONNX Runtime.
+
+    With settings.STRICT_MODELS=True (production) a missing/broken model raises at load time and
+    inference errors propagate. The Haar Cascade fallback is only available when STRICT_MODELS=False.
     """
     def __init__(self, model_path: Optional[str] = None):
         self.session = None
@@ -26,10 +30,14 @@ class SCRFDDetector(FaceDetector):
         
         if model_path:
             self.load_model(model_path)
-            
+        elif settings.STRICT_MODELS:
+            raise RuntimeError("STRICT_MODELS=True but no SCRFD detector model path was configured.")
+
     def load_model(self, model_path: str) -> None:
-        """Loads the ONNX model, or falls back gracefully to OpenCV Haar Cascades."""
+        """Loads the ONNX model. Falls back to OpenCV Haar Cascades only when STRICT_MODELS=False."""
         if not os.path.exists(model_path):
+            if settings.STRICT_MODELS:
+                raise FileNotFoundError(f"SCRFD detector model not found: {model_path} (STRICT_MODELS=True)")
             logger.warning(
                 "ONNX model file not found. Activating OpenCV Haar Cascade fallback detector.",
                 missing_path=model_path
@@ -42,27 +50,44 @@ class SCRFDDetector(FaceDetector):
             # Production deployments can alter providers to CUDAExecutionProvider if GPU is present.
             opts = ort.SessionOptions()
             opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            opts.intra_op_num_threads = 2
-            
+            opts.intra_op_num_threads = settings.ORT_INTRA_OP_THREADS
+            opts.inter_op_num_threads = 1
+
             self.session = ort.InferenceSession(
-                model_path, 
-                sess_options=opts, 
+                model_path,
+                sess_options=opts,
                 providers=["CPUExecutionProvider"]
             )
             self.input_name = self.session.get_inputs()[0].name
             self.output_names = [o.name for o in self.session.get_outputs()]
+
+            # Warm-up / sanity check: proves the graph actually runs with the expected 640x640 input
+            # (so an incompatible model fails at startup instead of on the first real frame).
+            dummy = np.zeros((1, 3, 640, 640), dtype=np.float32)
+            self.session.run(self.output_names, {self.input_name: dummy})
+
             self.use_fallback = False
-            logger.info("SCRFD ONNX detector loaded successfully", model_path=model_path)
-            
+            logger.info(
+                "SCRFD ONNX detector loaded and warmed up",
+                model_path=model_path,
+                intra_op_threads=settings.ORT_INTRA_OP_THREADS
+            )
+
         except Exception as e:
+            if settings.STRICT_MODELS:
+                logger.critical("Failed to initialize SCRFD ONNX session (STRICT_MODELS=True)", error=str(e))
+                raise
             logger.error(
                 "Failed to initialize SCRFD ONNX session. Swapping to Haar Cascade fallback.",
                 error=str(e)
             )
+            self.session = None
             self._init_fallback()
 
     def _init_fallback(self) -> None:
-        """Initializes OpenCV Haar Cascade classifier as emergency fallback."""
+        """Initializes OpenCV Haar Cascade classifier as emergency fallback (development only)."""
+        if settings.STRICT_MODELS:
+            raise RuntimeError("Haar Cascade fallback is forbidden when STRICT_MODELS=True")
         self.use_fallback = True
         cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
         self.cascade_classifier = cv2.CascadeClassifier(cascade_path)
@@ -102,10 +127,16 @@ class SCRFDDetector(FaceDetector):
         return keep
 
     def detect(self, image: np.ndarray, threshold: float = 0.5) -> List[FaceDetectionResult]:
-        """Detects faces using ONNX SCRFD or Haar Cascade fallback."""
+        """Detects faces using ONNX SCRFD (or the Haar Cascade fallback when STRICT_MODELS=False)."""
+        if settings.STRICT_MODELS:
+            if self.session is None:
+                raise RuntimeError("SCRFD ONNX session is not loaded (STRICT_MODELS=True)")
+            # Any inference error propagates to the caller (HTTP 500); never fabricate detections.
+            return self._detect_onnx(image, threshold)
+
         if self.use_fallback:
             return self._detect_fallback(image, threshold)
-            
+
         try:
             return self._detect_onnx(image, threshold)
         except Exception as e:

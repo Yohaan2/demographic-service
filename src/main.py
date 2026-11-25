@@ -1,12 +1,14 @@
+import asyncio
 import time
 import cv2
 import numpy as np
 import threading
 from contextlib import asynccontextmanager
+from typing import AsyncIterator, Dict, Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import CONTENT_TYPE_LATEST
+from starlette.concurrency import run_in_threadpool
 
 from src.core.config import settings
 from src.core.logging import setup_logging, logger
@@ -26,6 +28,75 @@ setup_logging()
 # Backpressure Control State variables
 active_requests = 0
 active_requests_lock = threading.Lock()
+
+# Global inference concurrency limit for this process. CPU-bound work runs in the threadpool;
+# this caps how many frames are inside the models at the same time.
+inference_semaphore = asyncio.Semaphore(settings.INFERENCE_CONCURRENCY)
+
+
+class _CameraLockEntry:
+    __slots__ = ("lock", "users", "last_used")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0                      # holders + waiters; entry is never evicted while > 0
+        self.last_used = time.monotonic()
+
+
+class CameraLockRegistry:
+    """
+    One asyncio.Lock per camera_id so that two frames of the same camera never update its
+    ByteTracker concurrently (asyncio.Lock is FIFO, so frames are also processed in arrival order).
+    Idle entries are evicted after `ttl` seconds. Only touched from the event loop thread, and there is
+    no await between lookup and `users += 1`, so no extra locking is needed.
+    """
+
+    def __init__(self, ttl: float, sweep_interval: float = 60.0) -> None:
+        self._ttl = ttl
+        self._sweep_interval = sweep_interval
+        self._entries: Dict[str, _CameraLockEntry] = {}
+        self._last_sweep = time.monotonic()
+
+    @asynccontextmanager
+    async def hold(self, camera_id: str) -> AsyncIterator[None]:
+        entry = self._entries.get(camera_id)
+        if entry is None:
+            entry = _CameraLockEntry()
+            self._entries[camera_id] = entry
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.users -= 1
+            entry.last_used = time.monotonic()
+            self._maybe_sweep()
+
+    def _maybe_sweep(self) -> None:
+        now = time.monotonic()
+        if now - self._last_sweep < self._sweep_interval:
+            return
+        self._last_sweep = now
+        expired = [
+            cam for cam, e in self._entries.items()
+            if e.users == 0 and now - e.last_used > self._ttl
+        ]
+        for cam in expired:
+            del self._entries[cam]
+        if expired:
+            logger.debug("Evicted idle camera locks", evicted=len(expired), remaining=len(self._entries))
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+camera_locks = CameraLockRegistry(ttl=settings.TRACKER_TTL)
+
+
+def _decode_image(contents: bytes) -> Optional[np.ndarray]:
+    """Decodes an encoded image buffer into an OpenCV BGR array (None if decoding fails)."""
+    nparr = np.frombuffer(contents, np.uint8)
+    return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
 
 @asynccontextmanager
@@ -128,22 +199,28 @@ async def analyze_frame(
             status_code = 400
             raise HTTPException(status_code=400, detail="Uploaded file must be a valid image.")
             
-        # Read file contents and decode into OpenCV NumPy BGR format
+        # Read file contents and decode into OpenCV NumPy BGR format (off the event loop:
+        # JPEG decoding is CPU-bound and does not touch per-camera state, so no lock is needed)
         contents = await image.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
+        img_bgr = await run_in_threadpool(_decode_image, contents)
+
         if img_bgr is None:
             status_code = 400
             raise HTTPException(status_code=400, detail="Invalid image file or decoding failed.")
-            
+
         # Access the warmed pipeline from application state
         pipeline: AgeGenderPipeline = request.app.state.pipeline
-        
-        # Process frame and record pipeline execution time metrics
-        start_ts = time.time()
-        result = pipeline.process_frame(img_bgr, camera_id)
-        latency = time.time() - start_ts
+
+        # Lock order matters: take the per-camera lock FIRST and the global slot SECOND, so frames
+        # queued behind the same camera never hold inference slots that other cameras could use.
+        async with camera_locks.hold(camera_id):
+            async with inference_semaphore:
+                # Process frame in the threadpool and record pipeline execution time metrics.
+                # run_in_threadpool is shielded from cancellation (anyio), so even if the client
+                # disconnects the locks are only released once the worker thread has finished.
+                start_ts = time.time()
+                result = await run_in_threadpool(pipeline.process_frame, img_bgr, camera_id)
+                latency = time.time() - start_ts
         
         # Prometheus Metrics Tracking
         PROCESSING_TIME.observe(latency)
