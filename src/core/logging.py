@@ -4,6 +4,14 @@ from loguru import logger
 import json
 from src.core.config import settings
 
+class _SkipHealthAccessLog(logging.Filter):
+    """Descarta del access log de uvicorn las peticiones a /health y /metrics (healthcheck y Prometheus)."""
+    _paths = ('"GET /health ', '"GET /metrics ')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(p in msg for p in self._paths)
+
 
 class JSONFormatter:
     """Formatter to export logs to structured JSON format."""
@@ -58,6 +66,7 @@ def setup_logging():
             logger.opt(depth=depth, exception=record.exc_info).log(
                 level, record.getMessage()
             )
+            logging.getLogger("uvicorn.access").addFilter(_SkipHealthAccessLog())
 
     # Apply InterceptHandler to external libraries to centralize logs
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi"):
