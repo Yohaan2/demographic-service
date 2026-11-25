@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     CROP_SIZE: int = 224  # 112 or 224
     
     # Backpressure and Rate Limiting
-    MAX_PENDING_REQUESTS: int = 500
+    MAX_PENDING_REQUESTS: int = 64
     
     # Logging
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
